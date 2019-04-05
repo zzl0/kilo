@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import sys
 import tty
+import curses.ascii
 import termios
 import contextlib
 
@@ -17,12 +18,14 @@ def raw_mode():
 
 
 def main():
-    tty.setraw(sys.stdin)
-
     while True:
         c = sys.stdin.read(1)
         if c == 'q':
             return
+        elif curses.ascii.iscntrl(c):
+            print(f'{ord(c)}')
+        else:
+            print(f"{ord(c)} ('{c}')", )
 
 
 if __name__ == '__main__':
