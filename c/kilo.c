@@ -26,7 +26,10 @@
 #define CTRL_KEY(k) ((k) & 0x1f)
 
 enum editorKey {
+    ESC = 27,
     BACKSPACE = 127,
+    /* The following are just soft codes, not really reported by
+     * the terminal directly. */
     ARROW_LEFT = 1000,
     ARROW_RIGHT,
     ARROW_UP,
@@ -38,15 +41,16 @@ enum editorKey {
     PAGE_DOWN
 };
 
+/* Syntax highlight types */
 enum editorHighlight {
     HL_NORMAL = 0,
-    HL_COMMENT,
-    HL_MLCOMMENT,
+    HL_COMMENT,  /* Single line comment. */
+    HL_MLCOMMENT,  /* Multi-line comment. */
     HL_KEYWORD1,
     HL_KEYWORD2,
     HL_STRING,
     HL_NUMBER,
-    HL_MATCH
+    HL_MATCH  /* Search match. */
 };
 
 #define HL_HIGHLIGHT_NUMBERS (1<<0)
@@ -64,49 +68,69 @@ struct editorSyntax {
     int flags;
 };
 
+/* This structure represents a single line of the file we are editing. */
 typedef struct erow {
-    int idx;
-    int size;
-    int rsize;
-    char *chars;
-    char *render;
-    unsigned char *hl;
-    int hl_open_comment;
+    int idx;  /* Row index in the file, zero-based. */
+    int size;  /* Size of the row, excluding the null term. */
+    int rsize;  /* Size of the rendered row. */
+    char *chars;  /* Row content. */
+    char *render;  /* Row content "rendered" for screen (for TABs). */
+    unsigned char *hl;  /* Syntax highlight type for each character in render. */
+    int hl_open_comment;  /* Row had open comment at end in last syntax
+                             highlight check. */
 } erow;
 
 struct editorConfig {
-    int cx, cy;
-    int rx;
-    int rowoff;
-    int coloff;
-    int screenrows;
-    int screencols;
-    int numrows;
-    erow *row;
-    int dirty;
-    char *filename;
+    int cx, cy;  /* Cursor x and y position in characters */
+    int rx;  /* x index in the render field. */
+    int rowoff;  /* Offset of row displayed. */
+    int coloff;  /* Offset of column displayed. */
+    int screenrows;  /* Number of rows that we can show */
+    int screencols;  /* Number of cols that we can show */
+    int numrows;  /* Number of rows */
+    erow *row;  /* Rows */
+    int dirty;  /* File modified but not saved. */
+    char *filename;  /* Currently open filename */
     char statusmsg[80];
     time_t statusmsg_time;
-    struct editorSyntax *syntax;
-    struct termios orig_termios;
+    struct editorSyntax *syntax;  /* Current syntax highlight, or NULL */
+    struct termios orig_termios;  /* In order to restore at exit. */
 };
 
 struct editorConfig E;
 
-/*** filetypes ***/
+/* ========================== filetypes ===================================
+ *
+ * In order to add a new syntax, define two arrays with a list of file name
+ * matches and keywords. The file name matches are used in order to match
+ * a given syntax with a given file name: if a match pattern starts with a
+ * dot, it is matched as the last past of the filename, for example ".c".
+ * Otherwise the pattern is just searched inside the filename, like "Makefile").
+ *
+ * The list of keywords to highlight is just a list of words, however if
+ * a trailing '|' character is added at the end, they are highlighted in
+ * a different color, so that you can have two different sets of keys.
+ *
+ * Finally add a stanza in the HLDB global variable.
+ */
 
+/* C/C++ */
 char *C_HL_EXTENSIONS[] = {".c", ".h", ".cpp", NULL};
 char *C_HL_KEYWORDS[] = {
+    /* A few C/C++ keywords */
     "switch", "if", "while", "for", "break", "continue", "return", "else",
     "struct", "union", "typedef", "static", "enum", "class", "case",
 
+    /* C types */
     "int|", "long|", "double|", "float|", "char|", "unsigned|", "signed|",
     "void|", NULL
 };
 
+/* Here we define an array of syntax highlights by type, extensions, keywords,
+ * comments delimiters and flags. */
 struct editorSyntax HLDB[] = {
     {
-        "c",
+        "C/C++",
         C_HL_EXTENSIONS,
         C_HL_KEYWORDS,
         "//", "/*", "*/",
@@ -122,12 +146,11 @@ void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
 
-/*** terminal ***/
-
+/* ========================== terminal =================================== */
 void die(const char *s) {
-    write(STDOUT_FILENO, "\x1b[2J", 4);
-    write(STDOUT_FILENO, "\x1b[H", 3);
-
+    write(STDOUT_FILENO, "\x1b[2J", 4);  /* clear the entire screen */
+    write(STDOUT_FILENO, "\x1b[H", 3);  /* position the cursor at first row
+                                           and first column */
     perror(s);
     exit(1);
 }
@@ -137,40 +160,57 @@ void disableRawMode() {
         die("tcsetattr");
 }
 
+/* Raw mode: 1960 magic shit. */
 void enableRawMode() {
     if (tcgetattr(STDERR_FILENO, &E.orig_termios) == -1)
         die("tcgetattr");
 
     atexit(disableRawMode);
 
-    struct termios raw = E.orig_termios;
+    struct termios raw = E.orig_termios;  /* modify the original mode */
+    /* input modes: no break, no CR to NL, no parity check, no strip char,
+     * no start/stop output control. */
     raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    /* output modes - disable post processing */
     raw.c_oflag &= ~(OPOST);
+    /* control modes - set 8 bit chars */
     raw.c_cflag |= (CS8);
+    /* local modes - echoing off, canonical off, no extended functions,
+     * no signal chars (^Z,^C) */
     raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
+    /* control chars - set return condition: min number of bytes and timer. */
+    raw.c_cc[VMIN] = 0;  /* Return each byte, or zero for timeout. */
+    raw.c_cc[VTIME] = 1;  /* 100 ms timeout (unit is tens of second). */
 
+    /* put terminal in raw mode after flushing */
     if (tcsetattr(STDERR_FILENO, TCSAFLUSH, &raw) == -1)
         die("tcsetattr");
 }
 
+/* Read a key from the terminal put in raw mode, trying to handle
+ * escape sequences. */
 int editorReadKey() {
     int nread;
     char c;
     while ((nread = read(STDERR_FILENO, &c, 1)) != 1) {
+        /* In Cygwin, when read() times out it returns -1 with an errno of EAGAIN,
+           instead of just returning 0 like it’s supposed to. To make it work in
+           Cygwin, we won’t treat EAGAIN as an error. */
         if (nread == -1 && errno != EAGAIN) die("read");
     }
 
-    if (c == '\x1b') {
+    if (c == ESC) {
         char seq[3];
 
-        if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
-        if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+        /* If this is just an ESC, we'll timeout here. */
+        if (read(STDIN_FILENO, &seq[0], 1) != 1) return ESC;
+        if (read(STDIN_FILENO, &seq[1], 1) != 1) return ESC;
 
+        /* ESC [ sequences .*/
         if (seq[0] == '[') {
             if (seq[1] >= '0' && seq[1] <= '9') {
-                if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+                /* Extended escape, read additional byte. */
+                if (read(STDIN_FILENO, &seq[2], 1) != 1) return ESC;
                 if (seq[2] == '~') {
                     switch (seq[1]) {
                         case '1': return HOME_KEY;
@@ -192,6 +232,8 @@ int editorReadKey() {
                     case 'F': return END_KEY;
                 }
             }
+
+        /* ESC 0 sequences */
         } else if (seq[0] == 'O') {
             switch (seq[1]) {
                 case 'H': return HOME_KEY;
@@ -199,18 +241,23 @@ int editorReadKey() {
             }
         }
 
-        return '\x1b';
+        return ESC;
     } else {
         return c;
     }
 }
 
+/* Use the ESC [6n escape sequence to query the horizontal cursor position
+ * and return it. On error -1 is returned, on success the position of the
+ * cursor is stored at *rows and *cols and 0 is returned. */
 int getCursorPosition(int *rows, int *cols) {
     char buf[32];
     unsigned int i = 0;
 
+    /* Report curosr location */
     if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
 
+    /* Read the response: ESC [ rows ; cols R */
     while (i < sizeof(buf) - 1) {
         if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
         if (buf[i] == 'R') break;
@@ -218,16 +265,20 @@ int getCursorPosition(int *rows, int *cols) {
     }
     buf[i] = '\0';
 
-    if (buf[0] != '\x1b' || buf[1] != '[') return -1;
+    if (buf[0] != ESC || buf[1] != '[') return -1;
     if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
 
     return 0;
 }
 
+/* Try to get the number of columns in the current terminal. If the ioctl()
+ * call fails the function will try to query the terminal itself.
+ * Return 0 on success, -1 on error. */
 int getWindowSize(int *rows, int *cols) {
     struct winsize ws;
 
     if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+        /* Go to right/bottom margin and get position. */
         if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
         return getCursorPosition(rows, cols);
     } else {
@@ -243,11 +294,13 @@ int is_separator(int c) {
     return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
 }
 
+/* Set every byte of row->hl (that corresponds to every character in the line)
+ * to the right syntax highlight type (HL* defines). */
 void editorUpdateSyntax(erow *row) {
     row->hl = realloc(row->hl, row->rsize);
     memset(row->hl, HL_NORMAL, row->rsize);
 
-    if (E.syntax == NULL) return;
+    if (E.syntax == NULL) return;  /* No syntax, everything is HL_NORMAL. */
 
     char **keywords = E.syntax->keywords;
 
@@ -358,16 +411,17 @@ void editorUpdateSyntax(erow *row) {
         editorUpdateSyntax(&E.row[row->idx + 1]);
 }
 
+/* Maps syntax highlight token types to terminal colors. */
 int editorSyntaxToColor(int hl) {
     switch(hl) {
         case HL_COMMENT:
-        case HL_MLCOMMENT: return 36;
-        case HL_KEYWORD1: return 33;
-        case HL_KEYWORD2: return 32;
-        case HL_STRING: return 35;
-        case HL_NUMBER: return 31;
-        case HL_MATCH: return 34;
-        default: return 37;
+        case HL_MLCOMMENT: return 36;  // cyna
+        case HL_KEYWORD1: return 33;  // yellow
+        case HL_KEYWORD2: return 32;  // green
+        case HL_STRING: return 35;  // magenta
+        case HL_NUMBER: return 31;  // red
+        case HL_MATCH: return 34;  // blue
+        default: return 37;  // white
     }
 }
 
@@ -418,6 +472,7 @@ int editorRowRxToCx(erow *row, int rx) {
     return cx;
 }
 
+/* Update the rendered version and the syntax highlight of a row. */
 void editorUpdateRow(erow *row) {
     int tabs = 0;
     for (int j = 0; j < row->size; j++)
@@ -441,6 +496,8 @@ void editorUpdateRow(erow *row) {
     editorUpdateSyntax(row);
 }
 
+/* Insert a row at the specified position, shifting the other rows on the bottom
+ * if required. */
 void editorInsertRow(int at, char *s, size_t len) {
     if (at < 0 || at > E.numrows) return;
 
@@ -628,8 +685,6 @@ void editorSave() {
 
 /*** find ***/
 
-
-
 void editorFindCallback(char *query, int key) {
     static int last_match = -1;
     static int direction = 1;
@@ -643,7 +698,7 @@ void editorFindCallback(char *query, int key) {
         saved_hl = NULL;
     }
 
-    if (key == '\r' || key == '\x1b') {
+    if (key == '\r' || key == ESC) {
         last_match = -1;
         direction = 1;
         return;
@@ -687,7 +742,8 @@ void editorFind() {
     int saved_coloff = E.coloff;
     int saved_rowoff = E.rowoff;
 
-    char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)", editorFindCallback);
+    char *query = editorPrompt("Search: %s (Use ESC/Arrows/Enter)",
+                               editorFindCallback);
 
     if (query) {
         free(query);
@@ -737,7 +793,7 @@ char *editorPrompt(char *prompt, void (*callback)(char *, int)) {
         int c = editorReadKey();
         if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
             if (buflen != 0) buf[--buflen] = '\0';
-        } else if (c == '\x1b') {
+        } else if (c == ESC) {
             editorSetStatusMessage("");
             if (callback) callback(buf, c);
             free(buf);
@@ -868,7 +924,7 @@ void editorProcessKeypress() {
             break;
 
         case CTRL_KEY('l'):
-        case '\x1b':
+        case ESC:
             break;
 
         default:
@@ -1056,7 +1112,8 @@ int main(int argc, char *argv[]) {
         editorOpen(argv[1]);
     }
 
-    editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
+    editorSetStatusMessage(
+        "HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find");
 
     while (1) {
         editorRefreshScreen();
