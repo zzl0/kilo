@@ -10,13 +10,40 @@ from enum import Enum, auto
 import termios
 import contextlib
 
+import logging
+logging.basicConfig(filename='kilo.log',level=logging.DEBUG)
+
+
 KILO_VERSION = '0.0.1'
 
+
 class Key(Enum):
+    ESC = 27
     ARROW_LEFT = 1000
     ARROW_RIGHT = auto()
     ARROW_UP = auto()
     ARROW_DOWN = auto()
+    DEL = auto()
+    HOME = auto()
+    END = auto()
+    PAGE_UP = auto()
+    PAGE_DOWN = auto()
+
+SEQ_2_KEY = {
+    b'[1~': Key.HOME,
+    b'[4~': Key.END,
+    b'[3~': Key.DEL,
+    b'[5~': Key.PAGE_UP,
+    b'[6~': Key.PAGE_DOWN,
+    b'[7~': Key.HOME,
+    b'[8~': Key.END,
+    b'[A': Key.ARROW_UP,
+    b'[B': Key.ARROW_DOWN,
+    b'[C': Key.ARROW_RIGHT,
+    b'[D': Key.ARROW_LEFT,
+    b'[H': Key.HOME,
+    b'[F': Key.END,
+}
 
 ### terminal
 
@@ -32,7 +59,7 @@ def raw_mode(fd):
     new_attr[tty.LFLAG] &= ~(termios.ECHO | termios.ICANON | termios.IEXTEN
                              | termios.ISIG)
     # set the number of characters read at a time in non-canonical mode.
-    new_attr[tty.CC][termios.VMIN] = 1
+    new_attr[tty.CC][termios.VMIN] = 0
     # set timeout for read
     new_attr[tty.CC][termios.VTIME] = 1
 
@@ -52,7 +79,18 @@ def read_key(fd):
     while True:
         c = os.read(fd, 1)
         if c:
-            return ord(c)
+            break
+
+    d = ord(c)
+    if d == Key.ESC.value:
+        seq = os.read(fd, 3)
+        if len(seq) < 2:
+            return Key.ESC
+        if seq in SEQ_2_KEY:
+            return SEQ_2_KEY[seq]
+        return Key.ESC
+    else:
+        return d
 
 ### append buffer
 
@@ -114,24 +152,36 @@ class Editor():
     ## input
 
     def process_keypress(self):
-        c = read_key(self.in_fd)
+        k = read_key(self.in_fd)
 
-        if c == ctrl('q'):
+        if k == ctrl('q'):
             os.write(self.out_fd, b'\x1b[2J')
             os.write(self.out_fd, b'\x1b[H')
             sys.exit(0)
-        elif c in map(ord, 'wsad'):
-            self.move_cursor(c)
+        elif k == Key.HOME:
+            self.cx = 0
+        elif k == Key.END:
+            self.cx = self.screencols - 1
+        elif k in (Key.PAGE_DOWN, Key.PAGE_UP):
+            for _ in range(self.screenrows):
+                arrow_key = Key.ARROW_UP if k == Key.PAGE_UP else Key.ARROW_DOWN
+                self.move_cursor(arrow_key)
+        elif k in (Key.ARROW_DOWN, Key.ARROW_LEFT, Key.ARROW_RIGHT, Key.ARROW_UP):
+            self.move_cursor(k)
 
     def move_cursor(self, key):
-        if key == ord('a'):
-            self.cx -= 1
-        elif key == ord('d'):
-            self.cx += 1
-        elif key == ord('w'):
-            self.cy -= 1
-        elif key == ord('s'):
-            self.cy += 1
+        if key == Key.ARROW_LEFT:
+            if self.cx != 0:
+                self.cx -= 1
+        elif key == Key.ARROW_RIGHT:
+            if self.cx != self.screencols - 1:
+                self.cx += 1
+        elif key == key.ARROW_UP:
+            if self.cy != 0:
+                self.cy -= 1
+        elif key == Key.ARROW_DOWN:
+            if self.cy != self.screenrows - 1:
+                self.cy += 1
 
     ## run
 
