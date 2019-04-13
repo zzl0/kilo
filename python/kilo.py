@@ -3,11 +3,22 @@ import os
 import sys
 import tty
 import copy
+import fcntl
+import struct
 from curses.ascii import iscntrl
+from enum import Enum, auto
 import termios
 import contextlib
 
-### terminal ###
+KILO_VERSION = '0.0.1'
+
+class Key(Enum):
+    ARROW_LEFT = 1000
+    ARROW_RIGHT = auto()
+    ARROW_UP = auto()
+    ARROW_DOWN = auto()
+
+### terminal
 
 @contextlib.contextmanager
 def raw_mode(fd):
@@ -28,38 +39,107 @@ def raw_mode(fd):
     termios.tcsetattr(fd, termios.TCSAFLUSH, new_attr)
 
     try:
-        yield fd
+        yield
     finally:
         termios.tcsetattr(fd, termios.TCSAFLUSH, old_attr)
 
 
-def editor_read_key(fd):
+def get_window_size(fd):
+    return struct.unpack('hh', fcntl.ioctl(fd, termios.TIOCGWINSZ, '1234'))
+
+
+def read_key(fd):
     while True:
         c = os.read(fd, 1)
         if c:
             return ord(c)
 
-### output
+### append buffer
 
-def editor_refresh_screen():
-    # clear the entire screen
-    os.write(sys.stdout.fileno(), b'\x1b[2J')
-    # reposition the cursor
-    os.write(sys.stdout.fileno(), b'\x1b[H')
+class AppendBuffer():
+    def __init__(self):
+        self.buf = b''
 
-### input
+    def append(self, s):
+        if isinstance(s, str):
+            self.buf += s.encode()
+        else:
+            self.buf += s
 
-def editor_process_keypress(fd):
-    c = editor_read_key(fd)
+### editor
 
-    if c == ctrl('q'):
-        os.write(sys.stdout.fileno(), b'\x1b[2J')
-        os.write(sys.stdout.fileno(), b'\x1b[H')
-        sys.exit(0)
-    elif iscntrl(c):
-        print(f'{c}', end='\r\n')
-    else:
-        print(f"{c} ('{chr(c)}')", end='\r\n')
+class Editor():
+    def __init__(self):
+        self.in_fd = sys.stdin.fileno()
+        self.out_fd = sys.stdout.fileno()
+
+        self.cx = 0
+        self.cy = 0
+        self.screenrows, self.screencols = get_window_size(self.out_fd)
+
+    ## output
+
+    def draw_rows(self, ab):
+        for y in range(self.screenrows):
+            if y == self.screenrows // 3:
+                welcome_msg = f'Kilo editor -- version {KILO_VERSION}'.encode()
+                welcome_len = min(len(welcome_msg), self.screencols)
+                padding = (self.screencols - welcome_len) // 2
+                if padding:
+                    ab.append(b'~' + b' ' * padding)
+                ab.append(welcome_msg[:welcome_len])
+            else:
+                ab.append(b'~')
+            # erases the part of the line to the right of the cursor
+            ab.append(b'\x1b[K')
+            if y < self.screenrows - 1:
+                ab.append(b'\r\n')
+
+    def refresh_screen(self):
+        ab = AppendBuffer()
+
+        # hide cursor
+        ab.append(b'\x1b[?25l')
+        # reposition the cursor
+        ab.append(b'\x1b[H')
+
+        self.draw_rows(ab)
+
+        ab.append(f'\x1b[{self.cy + 1};{self.cx + 1}H')
+        # show cursor
+        ab.append(b'\x1b[?25h')
+
+        os.write(self.out_fd, ab.buf)
+
+    ## input
+
+    def process_keypress(self):
+        c = read_key(self.in_fd)
+
+        if c == ctrl('q'):
+            os.write(self.out_fd, b'\x1b[2J')
+            os.write(self.out_fd, b'\x1b[H')
+            sys.exit(0)
+        elif c in map(ord, 'wsad'):
+            self.move_cursor(c)
+
+    def move_cursor(self, key):
+        if key == ord('a'):
+            self.cx -= 1
+        elif key == ord('d'):
+            self.cx += 1
+        elif key == ord('w'):
+            self.cy -= 1
+        elif key == ord('s'):
+            self.cy += 1
+
+    ## run
+
+    def run(self):
+        while True:
+            self.refresh_screen()
+            self.process_keypress()
+
 
 ### utils
 
@@ -67,12 +147,7 @@ def ctrl(c):
     return ord(c) & 0x1f
 
 
-def main(in_fd):
-    while True:
-        editor_refresh_screen()
-        editor_process_keypress(in_fd)
-
-
 if __name__ == '__main__':
-    with raw_mode(sys.stdin.fileno()) as in_fd:
-        main(in_fd)
+    with raw_mode(sys.stdin.fileno()):
+        editor = Editor()
+        editor.run()
