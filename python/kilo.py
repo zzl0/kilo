@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
+import os
 import sys
 import tty
 import copy
-import curses.ascii
+from curses.ascii import iscntrl
 import termios
 import contextlib
-
 
 ### terminal ###
 
 @contextlib.contextmanager
-def raw_mode(fileno):
-    old_attr = termios.tcgetattr(fileno)
+def raw_mode(fd):
+    old_attr = termios.tcgetattr(fd)
 
     new_attr = copy.deepcopy(old_attr)
     new_attr[tty.IFLAG] &= ~(termios.BRKINT | termios.ICRNL | termios.IXON
@@ -25,24 +25,54 @@ def raw_mode(fileno):
     # set timeout for read
     new_attr[tty.CC][termios.VTIME] = 1
 
-    termios.tcsetattr(fileno, termios.TCSAFLUSH, new_attr)
+    termios.tcsetattr(fd, termios.TCSAFLUSH, new_attr)
 
-    yield
+    try:
+        yield fd
+    finally:
+        termios.tcsetattr(fd, termios.TCSAFLUSH, old_attr)
 
-    termios.tcsetattr(fileno, termios.TCSAFLUSH, old_attr)
 
-
-def main():
+def editor_read_key(fd):
     while True:
-        c = sys.stdin.read(1)
-        if c == 'q':
-            return
-        elif curses.ascii.iscntrl(c):
-            print(f'{ord(c)}', end='\r\n')
-        else:
-            print(f"{ord(c)} ('{c}')", end='\r\n')
+        c = os.read(fd, 1)
+        if c:
+            return ord(c)
+
+### output
+
+def editor_refresh_screen():
+    # clear the entire screen
+    os.write(sys.stdout.fileno(), b'\x1b[2J')
+    # reposition the cursor
+    os.write(sys.stdout.fileno(), b'\x1b[H')
+
+### input
+
+def editor_process_keypress(fd):
+    c = editor_read_key(fd)
+
+    if c == ctrl('q'):
+        os.write(sys.stdout.fileno(), b'\x1b[2J')
+        os.write(sys.stdout.fileno(), b'\x1b[H')
+        sys.exit(0)
+    elif iscntrl(c):
+        print(f'{c}', end='\r\n')
+    else:
+        print(f"{c} ('{chr(c)}')", end='\r\n')
+
+### utils
+
+def ctrl(c):
+    return ord(c) & 0x1f
+
+
+def main(in_fd):
+    while True:
+        editor_refresh_screen()
+        editor_process_keypress(in_fd)
 
 
 if __name__ == '__main__':
-    with raw_mode(sys.stdin.fileno()):
-        main()
+    with raw_mode(sys.stdin.fileno()) as in_fd:
+        main(in_fd)
