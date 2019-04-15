@@ -110,9 +110,9 @@ class Row():
 
     def __init__(self, chars):
         self.chars = chars
-        self.render = self.gen_render_chars(chars)
+        self.render = self.gen_render_chars()
 
-    def gen_render_chars(self, chars):
+    def gen_render_chars(self):
         lst = []
         for c in self.chars:
             if c == '\t':
@@ -122,6 +122,10 @@ class Row():
             else:
                 lst.append(c)
         return ''.join(lst)
+
+    def insert_char(self, at, c):
+        self.chars = self.chars[:at] + c + self.chars[at:]
+        self.render = self.gen_render_chars()
 
     @property
     def size(self):
@@ -168,6 +172,12 @@ class Editor():
     def append_row(self, s):
         self.rows.append(Row(s))
         self.numrows += 1
+
+    def insert_char(self, c):
+        if self.cy == self.numrows:
+            self.append_row("")
+        self.rows[self.cy].insert_char(self.cx, c)
+        self.cx += 1
 
     ## output
 
@@ -267,6 +277,8 @@ class Editor():
                 self.move_cursor(arrow_key)
         elif k in (Key.ARROW_DOWN, Key.ARROW_LEFT, Key.ARROW_RIGHT, Key.ARROW_UP):
             self.move_cursor(k)
+        else:
+            self.insert_char(chr(k))
 
     def move_cursor(self, key):
         if key == Key.ARROW_LEFT:
