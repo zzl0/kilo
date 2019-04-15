@@ -13,21 +13,7 @@ import contextlib
 import logging
 logging.basicConfig(filename='kilo.log',level=logging.DEBUG)
 
-
 KILO_VERSION = '0.0.1'
-
-
-class Key(Enum):
-    ESC = 27
-    ARROW_LEFT = 1000
-    ARROW_RIGHT = auto()
-    ARROW_UP = auto()
-    ARROW_DOWN = auto()
-    DEL = auto()
-    HOME = auto()
-    END = auto()
-    PAGE_UP = auto()
-    PAGE_DOWN = auto()
 
 SEQ_2_KEY = {
     b'[1~': Key.HOME,
@@ -44,6 +30,19 @@ SEQ_2_KEY = {
     b'[H': Key.HOME,
     b'[F': Key.END,
 }
+
+
+class Key(Enum):
+    ESC = 27
+    ARROW_LEFT = 1000
+    ARROW_RIGHT = auto()
+    ARROW_UP = auto()
+    ARROW_DOWN = auto()
+    DEL = auto()
+    HOME = auto()
+    END = auto()
+    PAGE_UP = auto()
+    PAGE_DOWN = auto()
 
 ### terminal
 
@@ -106,6 +105,25 @@ class AppendBuffer():
 
 ### editor
 
+class Row():
+    KILO_TAB_STOP = 8
+
+    def __init__(self, chars):
+        self.chars = chars
+        self.render = self.gen_render_chars(chars)
+
+    def gen_render_chars(self, chars):
+        return chars.replace('\t', ' ' * self.KILO_TAB_STOP)
+
+    @property
+    def size(self):
+        return len(self.chars)
+
+    @property
+    def rsize(self):
+        return len(self.render)
+
+
 class Editor():
     def __init__(self):
         self.in_fd = sys.stdin.fileno()
@@ -113,27 +131,59 @@ class Editor():
 
         self.cx = 0
         self.cy = 0
+        self.rx = 0
         self.screenrows, self.screencols = get_window_size(self.out_fd)
+        self.rowoff = 0
+        self.coloff = 0
+        self.numrows = 0
+        self.rows = []
+
+    def open(self, filename):
+        with open(filename) as f:
+            for line in f:
+                line = line.rstrip('\r\n')
+                self.append_row(line)
+
+    def append_row(self, s):
+        self.rows.append(Row(s))
+        self.numrows += 1
 
     ## output
 
+    def scroll(self):
+        if self.cy < self.rowoff:
+            self.rowoff = self.cy
+        elif self.cy >= self.rowoff + self.screenrows:
+            self.rowoff = self.cy - self.screenrows + 1
+
+        if self.cx < self.coloff:
+            self.coloff = self.cx
+        elif self.cx >= self.coloff + self.screencols:
+            self.coloff = self.cx - self.screencols + 1
+
     def draw_rows(self, ab):
         for y in range(self.screenrows):
-            if y == self.screenrows // 3:
-                welcome_msg = f'Kilo editor -- version {KILO_VERSION}'.encode()
-                welcome_len = min(len(welcome_msg), self.screencols)
-                padding = (self.screencols - welcome_len) // 2
-                if padding:
-                    ab.append(b'~' + b' ' * padding)
-                ab.append(welcome_msg[:welcome_len])
+            filerow = y + self.rowoff
+            if filerow >= self.numrows:
+                if self.numrows == 0 and y == self.screenrows // 3:
+                    welcome_msg = f'Kilo editor -- version {KILO_VERSION}'.encode()
+                    welcome_len = min(len(welcome_msg), self.screencols)
+                    padding = (self.screencols - welcome_len) // 2
+                    if padding:
+                        ab.append(b'~' + b' ' * padding)
+                    ab.append(welcome_msg[:welcome_len])
+                else:
+                    ab.append(b'~')
             else:
-                ab.append(b'~')
+                ab.append(self.rows[filerow].render[self.coloff:])
+
             # erases the part of the line to the right of the cursor
             ab.append(b'\x1b[K')
             if y < self.screenrows - 1:
                 ab.append(b'\r\n')
 
     def refresh_screen(self):
+        self.scroll()
         ab = AppendBuffer()
 
         # hide cursor
@@ -143,7 +193,7 @@ class Editor():
 
         self.draw_rows(ab)
 
-        ab.append(f'\x1b[{self.cy + 1};{self.cx + 1}H')
+        ab.append(f'\x1b[{self.cy - self.rowoff + 1};{self.cx - self.coloff + 1}H')
         # show cursor
         ab.append(b'\x1b[?25h')
 
@@ -161,7 +211,8 @@ class Editor():
         elif k == Key.HOME:
             self.cx = 0
         elif k == Key.END:
-            self.cx = self.screencols - 1
+            if self.cy < self.numrows:
+                self.cx = self.rows[self.cy].size
         elif k in (Key.PAGE_DOWN, Key.PAGE_UP):
             for _ in range(self.screenrows):
                 arrow_key = Key.ARROW_UP if k == Key.PAGE_UP else Key.ARROW_DOWN
@@ -173,19 +224,36 @@ class Editor():
         if key == Key.ARROW_LEFT:
             if self.cx != 0:
                 self.cx -= 1
+            elif self.cy > 0:
+                self.cy -= 1
+                self.cx = self.rows[self.cy].size
         elif key == Key.ARROW_RIGHT:
-            if self.cx != self.screencols - 1:
-                self.cx += 1
+            try:
+                if self.cx < self.rows[self.cy].size:
+                    self.cx += 1
+                elif self.cx == self.rows[self.cy].size:
+                    self.cy += 1
+                    self.cx = 0
+            except IndexError:
+                pass
         elif key == key.ARROW_UP:
             if self.cy != 0:
                 self.cy -= 1
         elif key == Key.ARROW_DOWN:
-            if self.cy != self.screenrows - 1:
+            if self.cy < self.numrows:
                 self.cy += 1
+
+        try:
+            row = self.rows[self.cy]
+            self.cx = min(self.cx, row.size)
+        except IndexError:
+            self.cx = 0
 
     ## run
 
-    def run(self):
+    def run(self, filename):
+        self.open(filename)
+
         while True:
             self.refresh_screen()
             self.process_keypress()
@@ -200,4 +268,4 @@ def ctrl(c):
 if __name__ == '__main__':
     with raw_mode(sys.stdin.fileno()):
         editor = Editor()
-        editor.run()
+        editor.run(sys.argv[1])
