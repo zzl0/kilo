@@ -2,6 +2,7 @@
 import os
 import sys
 import tty
+import time
 import copy
 import fcntl
 import struct
@@ -14,6 +15,18 @@ import logging
 logging.basicConfig(filename='kilo.log',level=logging.DEBUG)
 
 KILO_VERSION = '0.0.1'
+
+class Key(Enum):
+    ESC = 27
+    ARROW_LEFT = 1000
+    ARROW_RIGHT = auto()
+    ARROW_UP = auto()
+    ARROW_DOWN = auto()
+    DEL = auto()
+    HOME = auto()
+    END = auto()
+    PAGE_UP = auto()
+    PAGE_DOWN = auto()
 
 SEQ_2_KEY = {
     b'[1~': Key.HOME,
@@ -30,19 +43,6 @@ SEQ_2_KEY = {
     b'[H': Key.HOME,
     b'[F': Key.END,
 }
-
-
-class Key(Enum):
-    ESC = 27
-    ARROW_LEFT = 1000
-    ARROW_RIGHT = auto()
-    ARROW_UP = auto()
-    ARROW_DOWN = auto()
-    DEL = auto()
-    HOME = auto()
-    END = auto()
-    PAGE_UP = auto()
-    PAGE_DOWN = auto()
 
 ### terminal
 
@@ -113,7 +113,15 @@ class Row():
         self.render = self.gen_render_chars(chars)
 
     def gen_render_chars(self, chars):
-        return chars.replace('\t', ' ' * self.KILO_TAB_STOP)
+        lst = []
+        for c in self.chars:
+            if c == '\t':
+                size = len(lst)
+                spaces = self.KILO_TAB_STOP - (size % self.KILO_TAB_STOP)
+                lst.extend([' '] * spaces)
+            else:
+                lst.append(c)
+        return ''.join(lst)
 
     @property
     def size(self):
@@ -123,22 +131,35 @@ class Row():
     def rsize(self):
         return len(self.render)
 
+    def cx2rx(self, cx):
+        rx = 0
+        for i in range(cx):
+            if self.chars[i] == '\t':
+                rx += (self.KILO_TAB_STOP - 1) - (rx % self.KILO_TAB_STOP)
+            rx += 1
+        return rx
+
 
 class Editor():
     def __init__(self):
         self.in_fd = sys.stdin.fileno()
         self.out_fd = sys.stdout.fileno()
+        self.filename = None
 
         self.cx = 0
         self.cy = 0
         self.rx = 0
         self.screenrows, self.screencols = get_window_size(self.out_fd)
+        self.screenrows -= 2  # reserved last two rows for status bar and message
         self.rowoff = 0
         self.coloff = 0
         self.numrows = 0
         self.rows = []
+        self.statusmsg = ''
+        self.statusmsg_time = None
 
     def open(self, filename):
+        self.filename = filename
         with open(filename) as f:
             for line in f:
                 line = line.rstrip('\r\n')
@@ -151,15 +172,17 @@ class Editor():
     ## output
 
     def scroll(self):
+        self.rx = self.rows[self.cy].cx2rx(self.cx) if self.cy < self.numrows else 0
+
         if self.cy < self.rowoff:
             self.rowoff = self.cy
         elif self.cy >= self.rowoff + self.screenrows:
             self.rowoff = self.cy - self.screenrows + 1
 
-        if self.cx < self.coloff:
-            self.coloff = self.cx
-        elif self.cx >= self.coloff + self.screencols:
-            self.coloff = self.cx - self.screencols + 1
+        if self.rx < self.coloff:
+            self.coloff = self.rx
+        elif self.rx >= self.coloff + self.screencols:
+            self.coloff = self.rx - self.screencols + 1
 
     def draw_rows(self, ab):
         for y in range(self.screenrows):
@@ -179,8 +202,23 @@ class Editor():
 
             # erases the part of the line to the right of the cursor
             ab.append(b'\x1b[K')
-            if y < self.screenrows - 1:
-                ab.append(b'\r\n')
+            ab.append(b'\r\n')
+
+    def draw_status_bar(self, ab):
+        ab.append(b'\x1b[7m')
+        status = f'{self.filename or "No Name"} {self.numrows} lines'
+        ab.append(status)
+        rstatus = f'{self.cy + 1}/{self.numrows}'
+        for _ in range(len(status), self.screencols - len(rstatus)):
+            ab.append(b' ')
+        ab.append(rstatus)
+        ab.append(b'\x1b[m')
+        ab.append(b'\r\n')
+
+    def draw_message_bar(self, ab):
+        ab.append(b'\x1b[K')
+        if time.time() - self.statusmsg_time < 5:
+            ab.append(self.statusmsg)
 
     def refresh_screen(self):
         self.scroll()
@@ -192,12 +230,18 @@ class Editor():
         ab.append(b'\x1b[H')
 
         self.draw_rows(ab)
+        self.draw_status_bar(ab)
+        self.draw_message_bar(ab)
 
-        ab.append(f'\x1b[{self.cy - self.rowoff + 1};{self.cx - self.coloff + 1}H')
+        ab.append(f'\x1b[{self.cy - self.rowoff + 1};{self.rx - self.coloff + 1}H')
         # show cursor
         ab.append(b'\x1b[?25h')
 
         os.write(self.out_fd, ab.buf)
+
+    def set_status_message(self, msg):
+        self.statusmsg = msg
+        self.statusmsg_time = time.time()
 
     ## input
 
@@ -214,6 +258,10 @@ class Editor():
             if self.cy < self.numrows:
                 self.cx = self.rows[self.cy].size
         elif k in (Key.PAGE_DOWN, Key.PAGE_UP):
+            if k == Key.PAGE_UP:
+                self.cy = self.rowoff
+            else:
+                self.cy = min(self.numrows, self.rowoff + self.screenrows - 1)
             for _ in range(self.screenrows):
                 arrow_key = Key.ARROW_UP if k == Key.PAGE_UP else Key.ARROW_DOWN
                 self.move_cursor(arrow_key)
@@ -253,7 +301,7 @@ class Editor():
 
     def run(self, filename):
         self.open(filename)
-
+        self.set_status_message("HELP: Ctrl-Q = quit")
         while True:
             self.refresh_screen()
             self.process_keypress()
