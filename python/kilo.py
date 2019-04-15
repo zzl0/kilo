@@ -15,9 +15,11 @@ import logging
 logging.basicConfig(filename='kilo.log',level=logging.DEBUG)
 
 KILO_VERSION = '0.0.1'
+KILO_QUIT_TIMES = 2
 
 class Key(Enum):
     ESC = 27
+    BACKSPACE = 127
     ARROW_LEFT = 1000
     ARROW_RIGHT = auto()
     ARROW_UP = auto()
@@ -89,7 +91,10 @@ def read_key(fd):
             return SEQ_2_KEY[seq]
         return Key.ESC
     else:
-        return d
+        try:
+            return Key(d)
+        except ValueError:
+            return d
 
 ### append buffer
 
@@ -109,8 +114,19 @@ class Row():
     KILO_TAB_STOP = 8
 
     def __init__(self, chars):
+        self.set_chars(chars)
+
+    def set_chars(self, chars):
         self.chars = chars
         self.render = self.gen_render_chars()
+
+    @property
+    def size(self):
+        return len(self.chars)
+
+    @property
+    def rsize(self):
+        return len(self.render)
 
     def gen_render_chars(self):
         lst = []
@@ -124,16 +140,13 @@ class Row():
         return ''.join(lst)
 
     def insert_char(self, at, c):
-        self.chars = self.chars[:at] + c + self.chars[at:]
-        self.render = self.gen_render_chars()
+        self.set_chars(self.chars[:at] + c + self.chars[at:])
 
-    @property
-    def size(self):
-        return len(self.chars)
+    def del_char(self, at):
+        self.set_chars(self.chars[:at] + self.chars[at + 1:])
 
-    @property
-    def rsize(self):
-        return len(self.render)
+    def append_str(self, s):
+        self.set_chars(self.chars + s)
 
     def cx2rx(self, cx):
         rx = 0
@@ -157,27 +170,64 @@ class Editor():
         self.screenrows -= 2  # reserved last two rows for status bar and message
         self.rowoff = 0
         self.coloff = 0
-        self.numrows = 0
         self.rows = []
+        self.dirty = 0
         self.statusmsg = ''
         self.statusmsg_time = None
+
+    @property
+    def numrows(self):
+        return len(self.rows)
 
     def open(self, filename):
         self.filename = filename
         with open(filename) as f:
             for line in f:
                 line = line.rstrip('\r\n')
-                self.append_row(line)
+                self.insert_row(self.numrows, line)
+        self.dirty = 0
 
-    def append_row(self, s):
-        self.rows.append(Row(s))
-        self.numrows += 1
+    def insert_row(self, at, s):
+        if 0 <= at <= self.numrows:
+            self.rows.insert(at, Row(s))
+            self.dirty += 1
+
+    def del_row(self, at):
+        if 0 <= at < self.numrows:
+            self.rows.pop(at)
+            self.dirty += 1
 
     def insert_char(self, c):
         if self.cy == self.numrows:
-            self.append_row("")
+            self.insert_row(0, "")
         self.rows[self.cy].insert_char(self.cx, c)
         self.cx += 1
+        self.dirty += 1
+
+    def insert_newline(self):
+        if self.cx == 0:
+            self.insert_row(self.cy, "")
+        else:
+            row = self.rows[self.cy]
+            self.insert_row(self.cy + 1, row.chars[self.cx:])
+            row.set_chars(row.chars[:self.cx])
+        self.cy += 1
+        self.cx = 0
+
+    def del_char(self):
+        if (self.cx == 0 and self.cy == 0) or self.cy == self.numrows:
+            return
+        row = self.rows[self.cy]
+        if self.cx > 0:
+            row.del_char(self.cx - 1)
+            self.cx -= 1
+        else:
+            pre_row = self.rows[self.cy - 1]
+            self.cx = pre_row.size
+            pre_row.append_str(row.chars)
+            self.del_row(self.cy)
+            self.cy -= 1
+        self.dirty += 1
 
     ## output
 
@@ -216,7 +266,9 @@ class Editor():
 
     def draw_status_bar(self, ab):
         ab.append(b'\x1b[7m')
-        status = f'{self.filename or "No Name"} {self.numrows} lines'
+        filename = self.filename or "No Name"
+        dirtymsg = '(modified)' if self.dirty else ''
+        status = f'{filename} {self.numrows} lines {dirtymsg}'
         ab.append(status)
         rstatus = f'{self.cy + 1}/{self.numrows}'
         for _ in range(len(status), self.screencols - len(rstatus)):
@@ -249,24 +301,62 @@ class Editor():
 
         os.write(self.out_fd, ab.buf)
 
-    def set_status_message(self, msg):
-        self.statusmsg = msg
+    def set_status_message(self, format, *args):
+        self.statusmsg = format % args
         self.statusmsg_time = time.time()
 
     ## input
 
+    def prompt(self, s):
+        buf = ''
+        while True:
+            self.set_status_message(s, buf)
+            self.refresh_screen()
+
+            c = read_key(self.in_fd)
+            if c in (Key.DEL, ctrl('h'), Key.BACKSPACE):
+                if buf:
+                    buf = buf[:-1]
+            elif c == Key.ESC:
+                self.set_status_message('')
+                return ''
+            elif c == ord('\r'):
+                if buf:
+                    self.set_status_message('')
+                    return buf
+            elif not iscntrl(c) and c < 128:
+                buf += chr(c)
+
     def process_keypress(self):
         k = read_key(self.in_fd)
 
-        if k == ctrl('q'):
+        if k == ord('\r'):
+            self.insert_newline()
+        elif k == ctrl('q'):
+            if self.dirty:
+                if not hasattr(self, 'quit_times'):
+                    self.quit_times = KILO_QUIT_TIMES
+                if self.quit_times > 0:
+                    self.set_status_message(
+                        'WARNING!!! File has unsaved changes.'
+                        f'Press Ctrl-Q {self.quit_times} more times to quite.'
+                    )
+                    self.quit_times -= 1
+                    return
             os.write(self.out_fd, b'\x1b[2J')
             os.write(self.out_fd, b'\x1b[H')
             sys.exit(0)
+        elif k == ctrl('s'):
+            self.save()
         elif k == Key.HOME:
             self.cx = 0
         elif k == Key.END:
             if self.cy < self.numrows:
                 self.cx = self.rows[self.cy].size
+        elif k in (Key.BACKSPACE, ctrl('h'), Key.DEL):
+            if k == Key.DEL:
+                self.move_cursor(Key.ARROW_RIGHT)
+            self.del_char()
         elif k in (Key.PAGE_DOWN, Key.PAGE_UP):
             if k == Key.PAGE_UP:
                 self.cy = self.rowoff
@@ -277,8 +367,13 @@ class Editor():
                 self.move_cursor(arrow_key)
         elif k in (Key.ARROW_DOWN, Key.ARROW_LEFT, Key.ARROW_RIGHT, Key.ARROW_UP):
             self.move_cursor(k)
+        elif k in (ctrl('l'), Key.ESC):
+            # do nothing
+            pass
         else:
             self.insert_char(chr(k))
+
+        self.quit_times = KILO_QUIT_TIMES
 
     def move_cursor(self, key):
         if key == Key.ARROW_LEFT:
@@ -309,11 +404,28 @@ class Editor():
         except IndexError:
             self.cx = 0
 
+    def rows2str(self):
+        return '\n'.join(r.chars for r in self.rows)
+
+    def save(self):
+        if not self.filename:
+            self.filename = self.prompt("Save as: %s (ESC to cancel)")
+            if not self.filename:
+                self.set_status_message('Save aborted')
+                return
+
+        with open(self.filename, 'w') as f:
+            s = self.rows2str()
+            f.write(s)
+            self.dirty = 0
+            self.set_status_message(f"{len(s)} bytes written to disk")
+
     ## run
 
     def run(self, filename):
-        self.open(filename)
-        self.set_status_message("HELP: Ctrl-Q = quit")
+        if filename:
+            self.open(filename)
+        self.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit")
         while True:
             self.refresh_screen()
             self.process_keypress()
@@ -328,4 +440,5 @@ def ctrl(c):
 if __name__ == '__main__':
     with raw_mode(sys.stdin.fileno()):
         editor = Editor()
-        editor.run(sys.argv[1])
+        filename = sys.argv[1] if len(sys.argv) > 1 else ''
+        editor.run(filename)
