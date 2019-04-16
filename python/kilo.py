@@ -20,9 +20,49 @@ HL_HIGHLIGHT_NUMBERS = 1 << 0
 HL_HIGHLIGHT_STRINGS = 1 << 1
 
 
+class Key(Enum):
+    ESC = 27
+    BACKSPACE = 127
+    ARROW_LEFT = 1000
+    ARROW_RIGHT = auto()
+    ARROW_UP = auto()
+    ARROW_DOWN = auto()
+    DEL = auto()
+    HOME = auto()
+    END = auto()
+    PAGE_UP = auto()
+    PAGE_DOWN = auto()
+
+
+SEQ_2_KEY = {
+    b'[1~': Key.HOME,
+    b'[4~': Key.END,
+    b'[3~': Key.DEL,
+    b'[5~': Key.PAGE_UP,
+    b'[6~': Key.PAGE_DOWN,
+    b'[7~': Key.HOME,
+    b'[8~': Key.END,
+    b'[A': Key.ARROW_UP,
+    b'[B': Key.ARROW_DOWN,
+    b'[C': Key.ARROW_RIGHT,
+    b'[D': Key.ARROW_LEFT,
+    b'[H': Key.HOME,
+    b'[F': Key.END,
+}
+
+
+class Highlight(Enum):
+    NORMAL = 37
+    COMMENT = 36
+    KEYWORD1 = 33
+    KEYWORD2 = 32
+    STRING = 35
+    NUMBER = 31
+    MATCH = 34
+
+
 class FileSyntax:
-    def __init__(self, filetype, filematch, keywords, singleline_comment_start,
-            flags):
+    def __init__(self, filetype, filematch, keywords, singleline_comment_start, flags):
         self.filetype = filetype
         self.filematch = filematch
         self.keywords = keywords
@@ -43,44 +83,6 @@ HLDB = [
         HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
     ),
 ]
-
-class Key(Enum):
-    ESC = 27
-    BACKSPACE = 127
-    ARROW_LEFT = 1000
-    ARROW_RIGHT = auto()
-    ARROW_UP = auto()
-    ARROW_DOWN = auto()
-    DEL = auto()
-    HOME = auto()
-    END = auto()
-    PAGE_UP = auto()
-    PAGE_DOWN = auto()
-
-SEQ_2_KEY = {
-    b'[1~': Key.HOME,
-    b'[4~': Key.END,
-    b'[3~': Key.DEL,
-    b'[5~': Key.PAGE_UP,
-    b'[6~': Key.PAGE_DOWN,
-    b'[7~': Key.HOME,
-    b'[8~': Key.END,
-    b'[A': Key.ARROW_UP,
-    b'[B': Key.ARROW_DOWN,
-    b'[C': Key.ARROW_RIGHT,
-    b'[D': Key.ARROW_LEFT,
-    b'[H': Key.HOME,
-    b'[F': Key.END,
-}
-
-class Highlight(Enum):
-    NORMAL = 37
-    COMMENT = 36
-    KEYWORD1 = 33
-    KEYWORD2 = 32
-    STRING = 35
-    NUMBER = 31
-    MATCH = 34
 
 ### terminal
 
@@ -137,6 +139,9 @@ def is_separator(c):
     return c.isspace() or c == '\0' or c in ',.()+-/*=~%<>[];:'
 
 
+def ctrl(c):
+    return ord(c) & 0x1f
+
 ### append buffer
 
 class AppendBuffer():
@@ -149,7 +154,7 @@ class AppendBuffer():
         else:
             self.buf += s
 
-### editor
+### Row
 
 class Row():
     KILO_TAB_STOP = 8
@@ -279,6 +284,7 @@ class Row():
             prev_sep = is_separator(c)
             i += 1
 
+### Editor
 
 class Editor():
     def __init__(self):
@@ -408,7 +414,6 @@ class Editor():
                 curr_color = -1
                 row = self.rows[filerow]
                 s = row.render[self.coloff: self.coloff + self.screencols]
-                logging.debug(f'line:{filerow} {s}')
                 for i, c in enumerate(s):
                     j = i + self.coloff
                     color = row.hl[j].value
@@ -644,12 +649,6 @@ class Editor():
         while True:
             self.refresh_screen()
             self.process_keypress()
-
-
-### utils
-
-def ctrl(c):
-    return ord(c) & 0x1f
 
 
 if __name__ == '__main__':
