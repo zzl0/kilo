@@ -16,6 +16,33 @@ logging.basicConfig(filename='kilo.log',level=logging.DEBUG)
 
 KILO_VERSION = '0.0.1'
 KILO_QUIT_TIMES = 2
+HL_HIGHLIGHT_NUMBERS = 1 << 0
+HL_HIGHLIGHT_STRINGS = 1 << 1
+
+
+class FileSyntax:
+    def __init__(self, filetype, filematch, keywords, singleline_comment_start,
+            flags):
+        self.filetype = filetype
+        self.filematch = filematch
+        self.keywords = keywords
+        self.singleline_comment_start = singleline_comment_start
+        self.flags = flags
+
+HLDB = [
+    FileSyntax(
+        "Python",
+        ['.py'],
+        [
+            # Python keywords
+            "and", "as", "assert", "break", "class", "continue", "def", "del", "elif", "else", "except", "exec", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "not", "or", "pass", "print", "raise", "return", "try", "while", "with", "yield",
+            # Python types
+            "buffer|", "bytearray|", "complex|", "False|", "float|", "frozenset|", "int|", "list|", "long|", "None|", "set|", "str|", "tuple|", "True|", "type|", "unicode|", "xrange|"
+        ],
+        '#',
+        HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS
+    ),
+]
 
 class Key(Enum):
     ESC = 27
@@ -45,6 +72,15 @@ SEQ_2_KEY = {
     b'[H': Key.HOME,
     b'[F': Key.END,
 }
+
+class Highlight(Enum):
+    NORMAL = 37
+    COMMENT = 36
+    KEYWORD1 = 33
+    KEYWORD2 = 32
+    STRING = 35
+    NUMBER = 31
+    MATCH = 34
 
 ### terminal
 
@@ -96,6 +132,11 @@ def read_key(fd):
         except ValueError:
             return d
 
+
+def is_separator(c):
+    return c.isspace() or c == '\0' or c in ',.()+-/*=~%<>[];:'
+
+
 ### append buffer
 
 class AppendBuffer():
@@ -113,12 +154,14 @@ class AppendBuffer():
 class Row():
     KILO_TAB_STOP = 8
 
-    def __init__(self, chars):
+    def __init__(self, chars, editor):
+        self.editor = editor
         self.set_chars(chars)
 
     def set_chars(self, chars):
         self.chars = chars
         self.render = self.gen_render_chars()
+        self.update_syntax()
 
     @property
     def size(self):
@@ -166,6 +209,76 @@ class Row():
                 return cx
         return cx
 
+    def update_syntax(self):
+        self.hl = [Highlight.NORMAL] * self.rsize
+        syntax = self.editor.syntax
+        if not syntax:
+            return
+
+        keywords = self.editor.syntax.keywords
+        scs = self.editor.syntax.singleline_comment_start
+
+        prev_sep = True
+        in_string = None
+
+        i = 0
+        while i < self.rsize:
+            c = self.render[i]
+            prev_hl = self.hl[i - 1] if i > 0 else Highlight.NORMAL
+
+            if scs and not in_string:
+                if self.render[i: i + len(scs)] == scs:
+                    for j in range(i, self.rsize):
+                        self.hl[j] = Highlight.COMMENT
+                    break
+
+            if syntax.flags & HL_HIGHLIGHT_STRINGS:
+                if in_string:
+                    self.hl[i] = Highlight.STRING
+                    if c == '\\' and i + 1 < self.rsize:
+                        self.hl[i + 1] = Highlight.STRING
+                        i += 2
+                        continue
+                    if c == in_string:
+                        in_string = None
+                    i += 1
+                    prev_sep = True
+                    continue
+                elif c == '"' or c == "'":
+                    in_string = c
+                    self.hl[i] = Highlight.STRING
+                    i += 1
+                    continue
+
+            if syntax.flags & HL_HIGHLIGHT_NUMBERS:
+                if (c.isdigit() and (prev_sep or prev_hl == Highlight.NUMBER)) \
+                    or (c == '.' and prev_hl == Highlight.NUMBER):
+                    self.hl[i] = Highlight.NUMBER
+                    i += 1
+                    prev_sep = False
+                    continue
+
+            if prev_sep:
+                found = False
+                for kw in keywords:
+                    is_kw2 = kw[-1] == '|'
+                    if is_kw2:
+                        kw = kw[:-1]
+
+                    end = i + len(kw)
+                    if self.render[i: end] == kw and (end == self.rsize or is_separator(self.render[end])):
+                        found = True
+                        for j in range(i, end):
+                            self.hl[j] = Highlight.KEYWORD2 if is_kw2 else Highlight.KEYWORD1
+                        i = end
+                        break
+                if found:
+                    prev_sep = False
+                    continue
+
+            prev_sep = is_separator(c)
+            i += 1
+
 
 class Editor():
     def __init__(self):
@@ -187,6 +300,9 @@ class Editor():
 
         self.last_match = -1
         self.direction = 1
+        self.saved_hl_line = None
+        self.saved_hl = None
+        self.syntax = None
 
     @property
     def numrows(self):
@@ -194,15 +310,33 @@ class Editor():
 
     def open(self, filename):
         self.filename = filename
+        self.select_syntax()
+
         with open(filename) as f:
             for line in f:
                 line = line.rstrip('\r\n')
                 self.insert_row(self.numrows, line)
         self.dirty = 0
 
+    def select_syntax(self):
+        if not self.filename:
+            return
+
+        try:
+            ext = '.' + self.filename.rsplit('.', 1)[1]
+        except IndexError:
+            ext = None
+
+        for syntax in HLDB:
+            for m in syntax.filematch:
+                is_ext = m[0] == '.'
+                if ((is_ext and ext and ext == m) or (not is_ext and self.filename == m)):
+                    self.syntax = syntax
+                    return
+
     def insert_row(self, at, s):
         if 0 <= at <= self.numrows:
-            self.rows.insert(at, Row(s))
+            self.rows.insert(at, Row(s, self))
             self.dirty += 1
 
     def del_row(self, at):
@@ -271,7 +405,18 @@ class Editor():
                 else:
                     ab.append(b'~')
             else:
-                ab.append(self.rows[filerow].render[self.coloff:])
+                curr_color = -1
+                row = self.rows[filerow]
+                s = row.render[self.coloff: self.coloff + self.screencols]
+                logging.debug(f'line:{filerow} {s}')
+                for i, c in enumerate(s):
+                    j = i + self.coloff
+                    color = row.hl[j].value
+                    if color != curr_color:
+                        curr_color = color
+                        ab.append(f'\x1b[{color}m')
+                    ab.append(c)
+                ab.append(f'\x1b[{Highlight.NORMAL.value}m')
 
             # erases the part of the line to the right of the cursor
             ab.append(b'\x1b[K')
@@ -283,7 +428,8 @@ class Editor():
         dirtymsg = '(modified)' if self.dirty else ''
         status = f'{filename} {self.numrows} lines {dirtymsg}'
         ab.append(status)
-        rstatus = f'{self.cy + 1}/{self.numrows}'
+        filetype = self.syntax.filetype if self.syntax else 'no ft'
+        rstatus = f'{filetype} | {self.cy + 1}/{self.numrows}'
         for _ in range(len(status), self.screencols - len(rstatus)):
             ab.append(b' ')
         ab.append(rstatus)
@@ -433,6 +579,10 @@ class Editor():
                 self.set_status_message('Save aborted')
                 return
 
+            self.select_syntax()
+            for row in self.rows:
+                row.update_syntax()
+
         with open(self.filename, 'w') as f:
             s = self.rows2str()
             f.write(s)
@@ -442,7 +592,11 @@ class Editor():
     ## find
 
     def find_callback(self, query, key):
-        if key in (r'\r', Key.ESC):
+        if self.saved_hl:
+            row = self.rows[self.saved_hl_line]
+            row.hl = self.saved_hl
+
+        if key in (b'\r', Key.ESC):
             self.last_match = -1
             self.direction = 1
             return
@@ -468,6 +622,11 @@ class Editor():
                 self.cy = current
                 self.cx = row.rx2cx(idx)
                 self.rowoff = self.numrows
+
+                self.saved_hl = row.hl[:]
+                self.saved_hl_line = current
+                for i in range(idx, idx + len(query)):
+                    row.hl[i] = Highlight.MATCH
                 break
 
     def find(self):
