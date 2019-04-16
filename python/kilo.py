@@ -156,6 +156,16 @@ class Row():
             rx += 1
         return rx
 
+    def rx2cx(self, rx):
+        cur_rx = 0
+        for cx, c in enumerate(self.chars):
+            if c == '\t':
+                cur_rx += (self.KILO_TAB_STOP - 1) - (curr_rx % self.KILO_TAB_STOP)
+            cur_rx += 1
+            if cur_rx > rx:
+                return cx
+        return cx
+
 
 class Editor():
     def __init__(self):
@@ -174,6 +184,9 @@ class Editor():
         self.dirty = 0
         self.statusmsg = ''
         self.statusmsg_time = None
+
+        self.last_match = -1
+        self.direction = 1
 
     @property
     def numrows(self):
@@ -307,7 +320,7 @@ class Editor():
 
     ## input
 
-    def prompt(self, s):
+    def prompt(self, s, callback=lambda buf, c: None):
         buf = ''
         while True:
             self.set_status_message(s, buf)
@@ -319,13 +332,17 @@ class Editor():
                     buf = buf[:-1]
             elif c == Key.ESC:
                 self.set_status_message('')
+                callback(buf, c)
                 return ''
             elif c == ord('\r'):
                 if buf:
                     self.set_status_message('')
+                    callback(buf, c)
                     return buf
-            elif not iscntrl(c) and c < 128:
+            elif isinstance(c, int) and not iscntrl(c) and c < 128:
                 buf += chr(c)
+
+            callback(buf, c)
 
     def process_keypress(self):
         k = read_key(self.in_fd)
@@ -353,6 +370,8 @@ class Editor():
         elif k == Key.END:
             if self.cy < self.numrows:
                 self.cx = self.rows[self.cy].size
+        elif k == ctrl('f'):
+            self.find()
         elif k in (Key.BACKSPACE, ctrl('h'), Key.DEL):
             if k == Key.DEL:
                 self.move_cursor(Key.ARROW_RIGHT)
@@ -420,12 +439,49 @@ class Editor():
             self.dirty = 0
             self.set_status_message(f"{len(s)} bytes written to disk")
 
+    ## find
+
+    def find_callback(self, query, key):
+        if key in (r'\r', Key.ESC):
+            self.last_match = -1
+            self.direction = 1
+            return
+        elif key in (Key.ARROW_RIGHT, Key.ARROW_DOWN):
+            self.direction = 1
+        elif key in (Key.ARROW_LEFT, Key.ARROW_UP):
+            self.direction = -1
+        else:
+            self.last_match = -1
+            self.direction = 1
+
+        current = self.last_match
+        for i in range(self.numrows):
+            current += self.direction
+            if current == -1:
+                current = self.numrows - 1
+            elif current == self.numrows:
+                current = 0
+            row = self.rows[current]
+            idx = row.render.find(query)
+            if idx != -1:
+                self.last_match = current
+                self.cy = current
+                self.cx = row.rx2cx(idx)
+                self.rowoff = self.numrows
+                break
+
+    def find(self):
+        cx, cy, coloff, rowoff = self.cx, self.cy, self.coloff, self.rowoff
+        query = self.prompt('Search: %s (Use ESC/Arrows/Enter)', self.find_callback)
+        if not query:
+            self.cx, self.cy, self.coloff, self.rowoff = cx, cy, coloff, rowoff
+
     ## run
 
     def run(self, filename):
         if filename:
             self.open(filename)
-        self.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit")
+        self.set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | Ctrl-F = find")
         while True:
             self.refresh_screen()
             self.process_keypress()
